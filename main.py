@@ -1,14 +1,13 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled, VideoUnavailable
+from deep_translator import GoogleTranslator
 import re
-import traceback
+import os
+import requests
 
-# ── v1.2.4 uses instance, not class methods ──────────────────────────────────
-ytt = YouTubeTranscriptApi()   # ← This is the fix. Must instantiate first!
-
-app = FastAPI(title="YouTube Transcriber API", version="4.0.0")
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,51 +17,38 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
+# ── PROXY SETUP ──────────────────────────────────────────────
+# Free proxies from webshare.io — sign up free at webshare.io
+# Get 10 free proxies → paste one here
+# Format: "http://username:password@proxy_host:proxy_port"
+PROXY = os.getenv("PROXY_URL", None)
+
+def get_proxy_config():
+    if PROXY:
+        return {"http": PROXY, "https": PROXY}
+    return None
 
 def extract_video_id(url: str) -> str:
-    url = url.strip()
     patterns = [
-        r"(?:v=)([a-zA-Z0-9_-]{11})",
-        r"(?:youtu\.be/)([a-zA-Z0-9_-]{11})",
-        r"(?:shorts/)([a-zA-Z0-9_-]{11})",
-        r"(?:embed/)([a-zA-Z0-9_-]{11})",
-        r"(?:live/)([a-zA-Z0-9_-]{11})",
+        r'v=([a-zA-Z0-9_-]{11})',
+        r'youtu\.be/([a-zA-Z0-9_-]{11})',
+        r'shorts/([a-zA-Z0-9_-]{11})',
+        r'embed/([a-zA-Z0-9_-]{11})',
     ]
     for pattern in patterns:
         match = re.search(pattern, url)
         if match:
             return match.group(1)
-    if re.match(r"^[a-zA-Z0-9_-]{11}$", url):
-        return url
-    raise ValueError("Invalid YouTube URL. Please use a valid YouTube link.")
+    return None
 
 def format_time(seconds: float) -> str:
-    seconds = int(seconds)
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    s = seconds % 60
+    s = int(seconds)
+    h = s // 3600
+    m = (s % 3600) // 60
+    sec = s % 60
     if h > 0:
-        return f"{h}:{m:02d}:{s:02d}"
-    return f"{m}:{s:02d}"
-
-def process_raw(raw_list: list) -> list:
-    """Turn raw dicts into our clean format"""
-    result = []
-    for entry in raw_list:
-        text = str(entry.get("text", "")).replace("\n", " ").strip()
-        start = float(entry.get("start", 0))
-        duration = float(entry.get("duration", 0))
-        if text:
-            result.append({
-                "text": text,
-                "start": start,
-                "duration": duration,
-                "formatted_time": format_time(start),
-            })
-    return result
-
-# ─── Models ───────────────────────────────────────────────────────────────────
+        return f"{h}:{m:02d}:{sec:02d}"
+    return f"{m}:{sec:02d}"
 
 class TranscriptRequest(BaseModel):
     url: str
@@ -72,103 +58,140 @@ class TranslateRequest(BaseModel):
     text: str
     target_language: str
 
-# ─── Routes ───────────────────────────────────────────────────────────────────
-
 @app.get("/")
 def root():
-    return {"status": "YouTube Transcriber API is running 🚀", "version": "4.0.0"}
+    return {"status": "YouTube Transcriber API is running 🚀"}
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 @app.post("/transcript")
 async def get_transcript(req: TranscriptRequest):
-    try:
-        video_id = extract_video_id(req.url)
-        print(f"[INFO] Fetching: {video_id} | lang: {req.language}")
+    video_id = extract_video_id(req.url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL")
 
-        raw = None
+    print(f"[INFO] Fetching: {video_id} | lang: {req.language}")
 
-        # Strategy 1: requested language + english fallback
+    proxies = get_proxy_config()
+
+    # Try with proxy first if available, then without
+    attempt_configs = []
+    if proxies:
+        attempt_configs.append({"proxies": proxies})
+    attempt_configs.append({"proxies": None})  # fallback: no proxy
+
+    for config in attempt_configs:
         try:
-            fetched = ytt.fetch(video_id, languages=[req.language, "en"])
-            raw = fetched.to_raw_data()
-            print(f"[OK] Got transcript via fetch()")
-        except Exception as e1:
-            print(f"[WARN] fetch() failed: {e1}")
+            ytt = YouTubeTranscriptApi(proxies=config["proxies"])
 
-        # Strategy 2: list all available and grab first one
-        if not raw:
-            try:
-                transcript_list = ytt.list(video_id)
-                for t in transcript_list:
-                    fetched = t.fetch()
-                    raw = fetched.to_raw_data()
-                    print(f"[OK] Got transcript via list() in: {t.language_code}")
+            # Try requested language first
+            languages_to_try = [req.language, "en", "en-US", "en-GB", "a.en"]
+
+            fetched = None
+            for lang in languages_to_try:
+                try:
+                    fetched = ytt.fetch(video_id, languages=[lang])
                     break
-            except Exception as e2:
-                print(f"[WARN] list() failed: {e2}")
+                except Exception:
+                    continue
 
-        if not raw:
-            raise HTTPException(
-                status_code=404,
-                detail="No transcript found. This video may not have captions, or it may be private/age-restricted."
-            )
+            # If still nothing, try listing all available
+            if fetched is None:
+                try:
+                    transcript_list = ytt.list(video_id)
+                    # Try manual first, then auto-generated
+                    for t in transcript_list:
+                        if not t.is_generated:
+                            fetched = t.fetch()
+                            break
+                    if fetched is None:
+                        for t in transcript_list:
+                            fetched = t.fetch()
+                            break
+                except Exception:
+                    pass
 
-        processed = process_raw(raw)
+            if fetched is None:
+                continue  # try next config
 
-        if not processed:
-            raise HTTPException(status_code=404, detail="Transcript was empty.")
+            raw = fetched.to_raw_data()
 
-        full_text = " ".join([e["text"] for e in processed])
-        print(f"[INFO] Done: {len(processed)} lines, {len(full_text.split())} words")
+            transcript_lines = []
+            full_text_parts = []
 
-        return {
-            "video_id": video_id,
-            "transcript": processed,
-            "full_text": full_text,
-            "word_count": len(full_text.split()),
-            "line_count": len(processed),
-        }
+            for entry in raw:
+                text = entry.get("text", "").strip()
+                start = entry.get("start", 0)
+                duration = entry.get("duration", 0)
+                if text:
+                    transcript_lines.append({
+                        "text": text,
+                        "start": round(start, 2),
+                        "duration": round(duration, 2),
+                        "formatted_time": format_time(start),
+                    })
+                    full_text_parts.append(text)
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"[ERROR] {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+            full_text = " ".join(full_text_parts)
+            word_count = len(full_text.split())
 
+            return {
+                "video_id": video_id,
+                "transcript": transcript_lines,
+                "full_text": full_text,
+                "word_count": word_count,
+                "language": req.language,
+            }
+
+        except Exception as e:
+            print(f"[WARN] fetch() failed: {e}")
+            continue
+
+    raise HTTPException(
+        status_code=404,
+        detail="Transcript not found. YouTube may be blocking cloud server requests. Try using a proxy (see PROXY_URL env variable)."
+    )
 
 @app.get("/languages/{video_id}")
 async def get_languages(video_id: str):
-    try:
-        transcript_list = ytt.list(video_id)
-        languages = []
-        for t in transcript_list:
-            languages.append({
-                "code": t.language_code,
-                "name": t.language,
-                "auto_generated": t.is_generated,
-            })
-        return {"languages": languages, "count": len(languages)}
-    except Exception as e:
-        print(f"[WARN] Languages error: {e}")
-        return {"languages": [], "count": 0}
+    proxies = get_proxy_config()
 
+    configs = []
+    if proxies:
+        configs.append(proxies)
+    configs.append(None)
+
+    for proxy_config in configs:
+        try:
+            ytt = YouTubeTranscriptApi(proxies=proxy_config)
+            transcript_list = ytt.list(video_id)
+            languages = []
+            for t in transcript_list:
+                languages.append({
+                    "code": t.language_code,
+                    "name": t.language,
+                    "auto_generated": t.is_generated,
+                })
+            return {"video_id": video_id, "languages": languages}
+        except Exception as e:
+            print(f"[WARN] list() failed: {e}")
+            continue
+
+    return {"video_id": video_id, "languages": []}
 
 @app.post("/translate")
 async def translate_text(req: TranslateRequest):
+    if not req.text or not req.target_language:
+        raise HTTPException(status_code=400, detail="Missing text or target language")
     try:
-        from deep_translator import GoogleTranslator
-        if not req.text.strip():
-            raise HTTPException(status_code=400, detail="No text provided.")
-
         chunk_size = 4500
         chunks = [req.text[i:i+chunk_size] for i in range(0, len(req.text), chunk_size)]
-        translated = []
+        translated_chunks = []
         for chunk in chunks:
-            result = GoogleTranslator(source='auto', target=req.target_language).translate(chunk)
-            translated.append(result or "")
-
-        return {"translated": " ".join(translated)}
-    except HTTPException:
-        raise
+            translated = GoogleTranslator(source='auto', target=req.target_language).translate(chunk)
+            translated_chunks.append(translated)
+        return {"translated": " ".join(translated_chunks), "target_language": req.target_language}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
