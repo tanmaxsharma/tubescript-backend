@@ -1,7 +1,8 @@
-fastapi==0.111.0
-uvicorn==0.30.1
+fastapi==0.115.0
+uvicorn[standard]==0.32.1
 youtube-transcript-api==0.6.2
 deep-translator==1.11.4
-pydantic==2.7.4
-python-dotenv==1.0.0
-requests==2.31.0
+pydantic==2.10.3
+pydantic-core==2.27.1
+python-dotenv==1.0.1
+requests==2.32.3
