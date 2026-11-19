@@ -219,3 +219,17 @@ def test_process_raw_ignores_whitespace_only_text():
     assert len(lines) == 2
     assert [line["text"] for line in lines] == ["Hello", "World"]
     assert full_text == "Hello World"
+
+def test_process_raw_ignores_whitespace_in_object_entries():
+    raw = [
+        SimpleNamespace(text="Hello", start=0, duration=2),
+        SimpleNamespace(text="   ", start=2, duration=1),
+        SimpleNamespace(text="\n\t", start=3, duration=1),
+        SimpleNamespace(text="World", start=4, duration=2),
+    ]
+
+    lines, full_text = process_raw(raw)
+
+    assert len(lines) == 2
+    assert [line["text"] for line in lines] == ["Hello", "World"]
+    assert full_text == "Hello World"
