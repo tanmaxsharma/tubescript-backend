@@ -204,3 +204,17 @@ def test_process_raw_with_missing_fields():
 
     assert lines[1]["start"] == 2
     assert lines[1]["duration"] == 0
+
+def test_process_raw_ignores_whitespace_only_text():
+    raw = [
+        {"text": "Hello", "start": 0, "duration": 2},
+        {"text": "   ", "start": 2, "duration": 1},
+        {"text": "\n\t", "start": 3, "duration": 1},
+        {"text": "World", "start": 4, "duration": 2},
+    ]
+
+    lines, full_text = process_raw(raw)
+
+    assert len(lines) == 2
+    assert [line["text"] for line in lines] == ["Hello", "World"]
+    assert full_text == "Hello World"
