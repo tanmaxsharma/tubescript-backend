@@ -52,3 +52,28 @@ def test_process_raw_with_empty_input():
 
     assert lines == []
     assert full_text == ""
+
+
+from types import SimpleNamespace
+
+
+def test_process_raw_with_object_entries():
+    raw = [
+        SimpleNamespace(
+            text="Hello",
+            start=0,
+            duration=2
+        ),
+        SimpleNamespace(
+            text="World",
+            start=2,
+            duration=3
+        ),
+    ]
+
+    lines, full_text = process_raw(raw)
+
+    assert len(lines) == 2
+    assert full_text == "Hello World"
+    assert lines[0]["text"] == "Hello"
+    assert lines[1]["text"] == "World"
