@@ -12,7 +12,7 @@ from main import extract_video_id, format_time, process_raw
         ("https://www.youtube.com/shorts/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
         ("https://www.youtube.com/embed/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
         ("dQw4w9WgXcQ", "dQw4w9WgXcQ"),
-       ("invalid-url-too-long", None),
+        ("invalid-url-too-long", None),
     ],
 )
 def test_extract_video_id(url, expected):
